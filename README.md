@@ -71,15 +71,25 @@ python3 -m http.server 8000
 - **音频自愈**：iOS 在来电或切换应用后会把音频上下文置为 interrupted，页面在任何触摸、点击、按键、切回前台时自动恢复，敲击后若仍未运行会提示点一下屏幕。
 - **托管说明**：在 claude.ai 的 Artifact 里下载会被打包成 ZIP（内含 WAV），因为托管环境的下载白名单不含 `.wav`。
 
+## 部署
+
+页面是纯静态文件，没有任何第三方请求（字体全部内联），放到任何静态托管都能跑，也支持 PWA「添加到主屏幕」离线使用。
+
+**海外（GitHub Pages）**：仓库已带 `.github/workflows/pages.yml`。在 GitHub 仓库 Settings → Pages 把 Source 设为「GitHub Actions」，之后每次推送 `main` 自动部署到 `https://<用户名>.github.io/Claude-Industrial-Sound-Maker/`。
+
+**国内**：GitHub Pages / Vercel 在大陆访问不稳定。把仓库根目录（或 `dist/industrial-sound-maker.html` 单文件）上传到阿里云 OSS / 腾讯云 COS 开启静态网站托管并接 CDN 即可；绑定自己的域名需要先完成 ICP 备案。发新版本时记得把 `sw.js` 里的 `CACHE` 版本号加一，老用户才会更新。
+
+**App 壳**：如需上架应用商店，可用 Capacitor 把本目录打包为 iOS / Android 应用；Web Audio 在 WKWebView 与 Android WebView 中均可用。
+
 ## 字体
 
-界面文字使用 [缝合像素字体 Fusion Pixel 12px](https://github.com/TakWolf/fusion-pixel-font)（OFL-1.1），按界面实际用到的字符做了子集，三个语言变体（SC / JP / KR）总共约 26 KB，以 data URI 内联在 `css/fonts.css`。阿拉伯文没有像素字体，回退到 Google Fonts 的 Noto Kufi Arabic。
+界面文字使用 [缝合像素字体 Fusion Pixel 12px](https://github.com/TakWolf/fusion-pixel-font)（OFL-1.1），按界面实际用到的字符做了子集，三个语言变体（SC / JP / KR）总共约 26 KB，以 data URI 内联在 `css/fonts.css`。阿拉伯文没有像素字体，内联了 Noto Kufi Arabic（OFL）的子集，因此页面不依赖 Google Fonts，在大陆也能正常加载。
 
 改了文案之后重新生成字体子集：
 
 ```bash
 pip install fonttools brotli
-python3 tools/subset-fonts.py        # 会从 npm registry 下载 @fontsource 源字体
+python3 tools/subset-fonts.py        # 会从 npm registry 与 Google Fonts 下载源字体
 python3 tools/build-artifact.py      # 重新打包 dist/ 单文件
 ```
 
@@ -88,7 +98,11 @@ python3 tools/build-artifact.py      # 重新打包 dist/ 单文件
 ```
 index.html              页面骨架
 css/style.css           像素化样式（无圆角、缺角裁切、内凹斜面）
-css/fonts.css           生成的像素字体子集（data URI）
+css/fonts.css           生成的字体子集（data URI，含阿拉伯文）
+manifest.webmanifest    PWA 清单
+sw.js                   离线缓存 service worker
+icons/                  PWA 图标
+.github/workflows/      GitHub Pages 自动部署
 js/i18n.js              8 种语言的全部文案
 js/synth.js             音色合成、8-bit 模式、总线 + 位深/采样率压缩、录音器、ZIP 打包、离线渲染 / WAV 编码
 js/pixel.js             208×117 像素工厂场景（PixelMachine）

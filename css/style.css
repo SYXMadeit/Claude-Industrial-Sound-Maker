@@ -21,12 +21,12 @@
   --pad-hi: #2f3642;
   --bevel-l: rgba(255,255,255,0.09);
   --bevel-d: rgba(0,0,0,0.5);
-  --px: 'FP-SC', 'Noto Kufi Arabic', 'Courier New', monospace;
+  --px: 'FP-SC', 'KUFI', 'Courier New', monospace;
   --notch: 3px;
 }
-html[lang="ja"] { --px: 'FP-JP', 'Noto Kufi Arabic', 'Courier New', monospace; }
-html[lang="ko"] { --px: 'FP-KR', 'Noto Kufi Arabic', 'Courier New', monospace; }
-html[lang="ar"] { --px: 'FP-SC', 'Noto Kufi Arabic', sans-serif; }
+html[lang="ja"] { --px: 'FP-JP', 'KUFI', 'Courier New', monospace; }
+html[lang="ko"] { --px: 'FP-KR', 'KUFI', 'Courier New', monospace; }
+html[lang="ar"] { --px: 'FP-SC', 'KUFI', sans-serif; }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }

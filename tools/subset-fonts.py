@@ -6,6 +6,7 @@ https://github.com/TakWolf/fusion-pixel-font) embedded as woff2 data URIs.
   FP-SC  — Simplified-Chinese glyph forms; used for zh, en, es, it, de, ar (Latin part)
   FP-JP  — Japanese glyph forms; used for ja
   FP-KR  — Korean glyph forms; used for ko
+  KUFI   — Noto Kufi Arabic subset for the Arabic script (no pixel font covers it)
 
 Only the characters that actually appear in the UI are kept, so the whole file
 stays small. Sources are the @fontsource npm packages; the script downloads
@@ -22,6 +23,7 @@ VARIANTS = {  # family name -> (npm package, i18n language codes whose strings i
     'FP-JP': ('fusion-pixel-12px-proportional-jp', ['ja']),
     'FP-KR': ('fusion-pixel-12px-proportional-kr', ['ko']),
 }
+KUFI_CSS = 'https://fonts.googleapis.com/css2?family=Noto+Kufi+Arabic:wght@400&display=swap'
 ASCII = ''.join(chr(c) for c in range(0x20, 0x7F))
 LATIN1 = ''.join(chr(c) for c in range(0xA0, 0x100))
 SYMBOLS = '–—…·«»„“”‘’↓■▶●⚙→×°'
@@ -48,6 +50,25 @@ def fetch_package(pkg, dest):
                     f.write(tf.extractfile(m).read())
                 return woff
     sys.exit(f'no woff2 in {pkg}')
+
+
+def fetch_kufi(dest):
+    """Noto Kufi Arabic (OFL) from Google Fonts — the chunk whose unicode-range covers Arabic."""
+    woff = os.path.join(dest, 'noto-kufi-arabic.woff2')
+    if os.path.exists(woff):
+        return woff
+    print('  downloading Noto Kufi Arabic …')
+    req = urllib.request.Request(KUFI_CSS, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120'})
+    css = urllib.request.urlopen(req).read().decode('utf-8')
+    blocks = re.findall(r'@font-face \{(.*?)\}', css, re.S)
+    for b in blocks:
+        rng = re.search(r'unicode-range: ([^;]+);', b)
+        url = re.search(r'url\((https://fonts\.gstatic\.com[^)]+)\)', b)
+        if rng and url and 'U+0600' in rng.group(1):
+            with open(woff, 'wb') as f:
+                f.write(urllib.request.urlopen(url.group(1)).read())
+            return woff
+    sys.exit('no Arabic chunk found in Google Fonts CSS')
 
 
 def subset(src_woff, text, out_dir):
@@ -90,6 +111,17 @@ def main():
         css.append(f"@font-face {{ font-family: '{family}'; font-style: normal; font-weight: 400; font-display: block;\n"
                    f"  src: url(data:font/woff2;base64,{b64}) format('woff2'); }}")
         print(f'  {family}: {len(chars)} chars → {len(data) // 1024} KB')
+    # Arabic: no pixel font exists, so self-host a subset of Noto Kufi Arabic (keeps the
+    # page free of third-party requests — Google Fonts is unreachable in mainland China)
+    text = ASCII + lang_block(i18n, 'ar')
+    chars = ''.join(sorted(set(ch for ch in text if not ch.isspace() or ch == ' ')))
+    woff = fetch_kufi(args.src)
+    with tempfile.TemporaryDirectory() as tmp:
+        data = subset(woff, chars, tmp)
+    total += len(data)
+    css.append(f"@font-face {{ font-family: 'KUFI'; font-style: normal; font-weight: 400; font-display: block;\n"
+               f"  src: url(data:font/woff2;base64,{base64.b64encode(data).decode('ascii')}) format('woff2'); }}")
+    print(f'  KUFI: {len(chars)} chars → {len(data) // 1024} KB')
     out = os.path.join(ROOT, 'css', 'fonts.css')
     with open(out, 'w', encoding='utf-8') as f:
         f.write('\n'.join(css) + '\n')

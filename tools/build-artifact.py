@@ -16,8 +16,6 @@ css = read('css/fonts.css') + '\n' + read('css/style.css')
 
 out = f"""<title>工业声音生成器</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Noto+Kufi+Arabic:wght@400;600&display=swap" rel="stylesheet">
 <style>
 {css}
 html, body {{ background: var(--bg); }}

@@ -605,4 +605,11 @@
   document.addEventListener('visibilitychange', () => { if (!document.hidden) resumeCtx(); });
 
   applyLang();
+
+  /* ---------- PWA: offline cache + install, only when served as a normal site ---------- */
+  if ('serviceWorker' in navigator && !hosted && /^https?:$/.test(location.protocol)) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch(err => logErr('sw', err.message));
+    });
+  }
 })();
