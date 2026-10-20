@@ -1,0 +1,8 @@
+{
+  "appId": "com.majmanx.industrialsound",
+  "appName": "Industrial Sound Maker",
+  "webDir": "www",
+  "server": { "androidScheme": "https" },
+  "ios": { "contentInset": "automatic", "backgroundColor": "#0f1115" },
+  "android": { "backgroundColor": "#0f1115", "allowMixedContent": false }
+}

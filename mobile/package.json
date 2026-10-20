@@ -1,0 +1,20 @@
+{
+  "name": "industrial-sound-maker-mobile",
+  "version": "1.0.0",
+  "description": "Capacitor shell for the Industrial Sound Maker web app",
+  "scripts": {
+    "sync": "sh sync-www.sh",
+    "ios": "sh sync-www.sh && npx cap open ios",
+    "android": "sh sync-www.sh && npx cap open android"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/cli": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/ios": "^8.5.3"
+  },
+  "private": true
+}
