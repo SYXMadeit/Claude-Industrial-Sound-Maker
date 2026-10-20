@@ -2,9 +2,25 @@
 
 工业声音生成器 · Industrial Sound Maker · Play with some industrial core sound.
 
-一个纯前端页面，用 Web Audio API 实时合成工业声音，不依赖任何采样文件。像素风的工厂场景会随每个声音动起来（喷气、冒火花、齿轮转、传送带跑），整个界面都是像素化的，支持 8 种语言。
+<p align="center">
+  <a href="https://majmanx.github.io/Claude-Industrial-Sound-Maker/"><img alt="在线玩 · Play now" src="https://img.shields.io/badge/%E2%96%B6%20%E5%9C%A8%E7%BA%BF%E7%8E%A9%20%C2%B7%20PLAY%20NOW-e8792b?style=for-the-badge&logoColor=white"></a>
+  &nbsp;
+  <a href="https://github.com/majmanx/Claude-Industrial-Sound-Maker/releases/latest/download/industrial-sound-maker.html"><img alt="下载离线版 · Download" src="https://img.shields.io/badge/%E2%AC%87%20%E4%B8%8B%E8%BD%BD%E7%A6%BB%E7%BA%BF%E7%89%88%20%C2%B7%20DOWNLOAD-5cff7a?style=for-the-badge&labelColor=1f3a26"></a>
+  &nbsp;
+  <a href="https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fmajmanx%2FClaude-Industrial-Sound-Maker"><img alt="Deploy with Vercel" src="https://img.shields.io/badge/%E2%96%B2%20%E9%83%A8%E7%BD%B2%E5%88%B0%20VERCEL-000000?style=for-the-badge&logo=vercel&logoColor=white"></a>
+</p>
 
-**在线试玩：** https://claude.ai/artifact/LpZEC2JqscTUUpDfLZyyZ9
+<p align="center"><img src="docs/screenshot.png" alt="Industrial Sound Maker" width="860"></p>
+
+一个纯前端页面，用 Web Audio API 实时合成工业声音，不依赖任何采样文件。像素风的工厂场景会随每个声音动起来（喷气、冒火花、齿轮转、传送带跑），整个界面都是像素化的，支持 8 种语言，还有一个 8-BIT 复古模式。
+
+**三种玩法**
+
+| | 怎么用 |
+|---|---|
+| ▶ **在线玩** | 点上面的按钮直接打开网页版（GitHub Pages）。手机浏览器里选「添加到主屏幕」、电脑 Chrome/Edge 地址栏点「安装」，就能像独立应用一样打开并离线使用。 |
+| ⬇ **下载离线版** | 一个 HTML 文件，双击用浏览器打开即可，不需要联网，录音和 WAV 导出都能用。 |
+| ▲ **部署到 Vercel** | 一键把仓库部署到你自己的 Vercel 账号，拿到一个 `*.vercel.app` 网址。 |
 
 ## 运行
 
@@ -75,7 +91,9 @@ python3 -m http.server 8000
 
 页面是纯静态文件，没有任何第三方请求（字体全部内联），放到任何静态托管都能跑，也支持 PWA「添加到主屏幕」离线使用。
 
-**海外（GitHub Pages）**：仓库已带 `.github/workflows/pages.yml`。在 GitHub 仓库 Settings → Pages 把 Source 设为「GitHub Actions」，之后每次推送 `main` 自动部署到 `https://<用户名>.github.io/Claude-Industrial-Sound-Maker/`。
+**海外（GitHub Pages）**：仓库已带 `.github/workflows/pages.yml`，另有 `release.yml` 在 `dist/` 变动时自动把单文件离线版挂到 Releases 的 `latest`。在 GitHub 仓库 Settings → Pages 把 Source 设为「GitHub Actions」，之后每次推送 `main` 自动部署到 `https://<用户名>.github.io/Claude-Industrial-Sound-Maker/`。
+
+**Vercel**：点 README 顶部「部署到 Vercel」，零配置（静态站点，根目录即站点）。
 
 **国内**：GitHub Pages / Vercel 在大陆访问不稳定。把仓库根目录（或 `dist/industrial-sound-maker.html` 单文件）上传到阿里云 OSS / 腾讯云 COS 开启静态网站托管并接 CDN 即可；绑定自己的域名需要先完成 ICP 备案。发新版本时记得把 `sw.js` 里的 `CACHE` 版本号加一，老用户才会更新。
 
@@ -102,8 +120,10 @@ css/fonts.css           生成的字体子集（data URI，含阿拉伯文）
 manifest.webmanifest    PWA 清单
 sw.js                   离线缓存 service worker
 icons/                  PWA 图标
-.github/workflows/      GitHub Pages 自动部署
+.github/workflows/      GitHub Pages 自动部署 + 离线版 Release
+mobile/                 Capacitor 原生壳（App Store / Google Play）
 js/i18n.js              8 种语言的全部文案
+docs/                   README 截图
 js/synth.js             音色合成、8-bit 模式、总线 + 位深/采样率压缩、录音器、ZIP 打包、离线渲染 / WAV 编码
 js/pixel.js             208×117 像素工厂场景（PixelMachine）
 js/app.js               UI、键盘、循环调度、音序器、录制、保存、多语言
