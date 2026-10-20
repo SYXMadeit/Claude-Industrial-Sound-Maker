@@ -1,0 +1,1081 @@
+/* ============================================================
+   Industrial Sound Synth
+   All sounds are generated with the Web Audio API — no samples.
+   Every sound function has the signature
+       fn(ctx, dest, t, opts) -> durationSeconds
+   so it works both live (AudioContext) and offline
+   (OfflineAudioContext) for WAV export.
+   Loop sounds (rotation / drone) return a handle:
+       { stop(t), scheduleUntil(t), setParam(v) }
+   ============================================================ */
+const Synth = (() => {
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  const MIN = 0.0001;
+
+  /* ---------- 8-bit / chip mode ----------
+     Global switch consulted by the low-level helpers so every sound
+     (and the master bus) changes character at once. */
+  const chip = {
+    on: false,
+    bits: 6,        // output bit depth (2–12)
+    rate: 11025,    // output sample-and-hold rate (Hz)
+    noise: 0.25,    // grain: dither noise added before quantization (0–1)
+    frame: 60,      // envelope update rate (Hz) — NES-like stepped volume
+    arp: 0,         // arpeggio rate for tonal hits (Hz, 0 = off)
+    tune: 'penta',  // 'off' | 'semi' | 'penta' | 'major'
+    duty: 0.5,      // pulse width for oscillators (0.125 / 0.25 / 0.5)
+  };
+  function setChip(patch) { Object.assign(chip, patch); }
+  const SCALES = { semi: [0,1,2,3,4,5,6,7,8,9,10,11], penta: [0,2,4,7,9], major: [0,2,4,5,7,9,11] };
+  function qf(f) {
+    if (!chip.on || chip.tune === 'off' || f < 30 || !(f < 20000)) return f;
+    const n = 12 * Math.log2(f / 261.6256);           // semitones from C4
+    const oct = Math.floor(n / 12), pc = n - oct * 12;
+    const scale = SCALES[chip.tune] || SCALES.semi;
+    let best = scale[0], bd = 99;
+    for (const d of scale.concat([12])) { const dd = Math.abs(d - pc); if (dd < bd) { bd = dd; best = d; } }
+    return 261.6256 * Math.pow(2, (oct * 12 + best) / 12);
+  }
+  const waveCache = new WeakMap();
+  function pulseWave(ctx, duty) {
+    let m = waveCache.get(ctx);
+    if (!m) { m = {}; waveCache.set(ctx, m); }
+    if (!m[duty]) {
+      const N = 48, real = new Float32Array(N), imag = new Float32Array(N);
+      for (let n = 1; n < N; n++) real[n] = (2 / (n * Math.PI)) * Math.sin(n * Math.PI * duty);
+      m[duty] = ctx.createPeriodicWave(real, imag);
+    }
+    return m[duty];
+  }
+  function setType(ctx, o, type) {
+    if (!chip.on || type === 'triangle') { o.type = type; return; }
+    o.setPeriodicWave(pulseWave(ctx, type === 'sawtooth' ? 0.25 : chip.duty));
+  }
+  /** arpeggiate a tonal oscillator when chip.arp > 0 */
+  function arp(o, f, t, dur, ratios = [1, 1.5, 2]) {
+    if (!chip.on || !chip.arp) return;
+    const step = 1 / chip.arp;
+    let i = 0;
+    for (let tt = t; tt < t + dur; tt += step, i++) o.frequency.setValueAtTime(qf(f * ratios[i % ratios.length]), tt);
+  }
+  /** bit/sample-rate crusher, shared by the live bus and offline renders */
+  function crushBlock(inp, out, st, sr) {
+    const step = Math.pow(2, chip.bits - 1);
+    const inc = chip.rate / sr;
+    const na = chip.noise * chip.noise * 0.15;
+    for (let i = 0; i < inp.length; i++) {
+      st.phase += inc;
+      if (st.phase >= 1) {
+        st.phase -= 1;
+        let x = inp[i] + (na ? (Math.random() * 2 - 1) * na : 0);
+        x = x > 1 ? 1 : x < -1 ? -1 : x;
+        st.held = Math.round(x * step) / step;
+      }
+      out[i] = st.held;
+    }
+  }
+  function crushBufferInPlace(buf) {
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const d = buf.getChannelData(c);
+      crushBlock(d, d, { phase: 1, held: 0 }, buf.sampleRate);
+    }
+  }
+
+  /* ---------- shared buffers ---------- */
+  const noiseCache = new WeakMap();
+  function noiseBuffer(ctx) {
+    let m = noiseCache.get(ctx);
+    if (!m) { m = {}; noiseCache.set(ctx, m); }
+    const key = chip.on ? 'lfsr' + chip.rate : 'white';
+    if (m[key]) return m[key];
+    const len = ctx.sampleRate * 2;
+    const b = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = b.getChannelData(0);
+    if (chip.on) {
+      // NES-style 15-bit LFSR, clocked at the chip sample rate (sample-and-hold)
+      let reg = 1, v = 0;
+      const hold = Math.max(1, Math.round(ctx.sampleRate / chip.rate));
+      for (let i = 0; i < len; i++) {
+        if (i % hold === 0) {
+          const fb = (reg & 1) ^ ((reg >> 1) & 1);
+          reg = (reg >> 1) | (fb << 14);
+          v = (reg & 1) ? 0.8 : -0.8;
+        }
+        d[i] = v;
+      }
+    } else {
+      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    }
+    m[key] = b;
+    return b;
+  }
+  function noiseSrc(ctx, t, dur) {
+    const s = ctx.createBufferSource();
+    s.buffer = noiseBuffer(ctx);
+    s.loop = true;
+    s.loopStart = 0;
+    s.loopEnd = 2;
+    // random offset so successive hits don't sound identical
+    s.start(t, Math.random() * 1.5);
+    s.stop(t + dur + 0.05);
+    return s;
+  }
+  function impulse(ctx, seconds, decay) {
+    const len = Math.floor(ctx.sampleRate * seconds);
+    const b = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let c = 0; c < 2; c++) {
+      const d = b.getChannelData(c);
+      for (let i = 0; i < len; i++) {
+        const x = i / len;
+        // early metallic reflections + exponential tail
+        let v = (Math.random() * 2 - 1) * Math.pow(1 - x, decay);
+        if (i % 1471 < 8 && x < 0.2) v *= 3;
+        d[i] = v;
+      }
+    }
+    return b;
+  }
+  const curveCache = new WeakMap();
+  function distCurve(ctx, k) {
+    let m = curveCache.get(ctx);
+    if (!m) { m = {}; curveCache.set(ctx, m); }
+    if (!m[k]) {
+      const n = 1024, c = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const x = (i / (n - 1)) * 2 - 1;
+        c[i] = Math.tanh(x * k) / Math.tanh(k);
+      }
+      m[k] = c;
+    }
+    return m[k];
+  }
+
+  /* ---------- helpers ---------- */
+  function env(ctx, t, peak, attack, decay, floor = MIN) {
+    const g = ctx.createGain();
+    peak = Math.max(peak, MIN);
+    if (!chip.on) {
+      g.gain.setValueAtTime(MIN, t);
+      g.gain.exponentialRampToValueAtTime(peak, t + attack);
+      g.gain.exponentialRampToValueAtTime(floor, t + attack + decay);
+      return g;
+    }
+    // stepped envelope: volume only changes once per "frame"
+    const total = attack + decay;
+    const frames = Math.max(2, Math.ceil(total * chip.frame));
+    const K = 6;                                   // copies per frame → sharp steps
+    const curve = new Float32Array(frames * K);
+    for (let i = 0; i < frames; i++) {
+      const tt = (i / frames) * total;
+      const v = tt < attack ? MIN + (peak - MIN) * (tt / attack) : peak * Math.pow(floor / peak, (tt - attack) / decay);
+      for (let k = 0; k < K; k++) curve[i * K + k] = v;
+    }
+    g.gain.setValueAtTime(MIN, t);
+    g.gain.setValueCurveAtTime(curve, t, total);
+    return g;
+  }
+  function osc(ctx, type, f, t, dur) {
+    const o = ctx.createOscillator();
+    setType(ctx, o, type);
+    o.frequency.value = qf(f);
+    o.start(t);
+    o.stop(t + dur);
+    return o;
+  }
+  function filt(ctx, type, f, q) {
+    const b = ctx.createBiquadFilter();
+    b.type = type;
+    b.frequency.value = f;
+    if (q !== undefined) b.Q.value = q;
+    return b;
+  }
+
+  /* ---------- master bus ---------- */
+  function buildMaster(ctx) {
+    const input = ctx.createGain();
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -14;
+    comp.knee.value = 18;
+    comp.ratio.value = 5;
+    comp.attack.value = 0.004;
+    comp.release.value = 0.22;
+    const master = ctx.createGain();
+    master.gain.value = 0.8;
+
+    const conv = ctx.createConvolver();
+    conv.buffer = impulse(ctx, 2.2, 3.2);
+    const wet = ctx.createGain();
+    wet.gain.value = 0.28;
+    const wetHp = filt(ctx, 'highpass', 180);
+
+    input.connect(comp);
+    input.connect(wetHp).connect(conv).connect(wet).connect(comp);
+    comp.connect(master);
+
+    // bit/sample-rate crusher, created lazily the first time chip mode is
+    // switched on, so the plain path is exactly master → out → destination.
+    // AudioWorklet is preferred; ScriptProcessor is the fallback.
+    const out = ctx.createGain();
+    const offline = typeof OfflineAudioContext !== 'undefined' && ctx instanceof OfflineAudioContext;
+    let crusher = null, kind = null, routed = null, pending = null;
+    async function ensureCrusher() {
+      if (crusher) return;
+      if (ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined') {
+        try {
+          const url = URL.createObjectURL(new Blob([CRUSHER_WORKLET], { type: 'application/javascript' }));
+          await ctx.audioWorklet.addModule(url);
+          URL.revokeObjectURL(url);
+          crusher = new AudioWorkletNode(ctx, 'ism-crusher', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+          kind = 'worklet';
+          return;
+        } catch (e) { /* CSP or unsupported: fall back below */ }
+      }
+      const sp = ctx.createScriptProcessor(1024, 2, 2);
+      const states = [{ phase: 1, held: 0 }, { phase: 1, held: 0 }];
+      sp.onaudioprocess = e => {
+        for (let c = 0; c < 2; c++) {
+          const inp = e.inputBuffer.getChannelData(c), o = e.outputBuffer.getChannelData(c);
+          if (chip.on) crushBlock(inp, o, states[c], ctx.sampleRate); else o.set(inp);
+        }
+      };
+      crusher = sp; kind = 'script';
+    }
+    function sync() {
+      if (kind !== 'worklet' || !crusher) return;
+      const p = crusher.parameters;
+      p.get('on').value = chip.on ? 1 : 0;
+      p.get('bits').value = chip.bits;
+      p.get('rate').value = chip.rate;
+      p.get('noise').value = chip.noise;
+    }
+    function route() {
+      const want = chip.on && !offline ? 'crush' : 'dry';
+      if (want === routed) { sync(); return pending || Promise.resolve(); }
+      const run = async () => {
+        if (want === 'crush') await ensureCrusher();
+        try { master.disconnect(); } catch (e) { /* not connected yet */ }
+        if (crusher) { try { crusher.disconnect(); } catch (e) { /* ignore */ } }
+        if (want === 'crush') { master.connect(crusher); crusher.connect(out); }
+        else master.connect(out);
+        routed = want;
+        sync();
+      };
+      pending = run().catch(err => { console.error(err); if (routed !== 'dry') { try { master.disconnect(); } catch (e) {} master.connect(out); routed = 'dry'; } });
+      return pending;
+    }
+    route();
+    out.connect(ctx.destination);
+    return { input, wet, master, comp, out, route, sync, get engine() { return kind || 'none'; } };
+  }
+
+  const CRUSHER_WORKLET = `
+    class Crusher extends AudioWorkletProcessor {
+      static get parameterDescriptors() {
+        return [{ name: 'on', defaultValue: 0 }, { name: 'bits', defaultValue: 6 },
+                { name: 'rate', defaultValue: 11025 }, { name: 'noise', defaultValue: 0.25 }];
+      }
+      constructor() { super(); this.st = [{ phase: 1, held: 0 }, { phase: 1, held: 0 }]; }
+      process(inputs, outputs, params) {
+        const inp = inputs[0], out = outputs[0];
+        if (!inp || !inp.length) return true;
+        const on = params.on[0] > 0.5, step = Math.pow(2, params.bits[0] - 1);
+        const inc = params.rate[0] / sampleRate, na = params.noise[0] * params.noise[0] * 0.15;
+        for (let c = 0; c < out.length; c++) {
+          const i = inp[c] || inp[0], o = out[c], st = this.st[c] || (this.st[c] = { phase: 1, held: 0 });
+          if (!on) { o.set(i); continue; }
+          for (let n = 0; n < i.length; n++) {
+            st.phase += inc;
+            if (st.phase >= 1) {
+              st.phase -= 1;
+              let x = i[n] + (na ? (Math.random() * 2 - 1) * na : 0);
+              x = x > 1 ? 1 : x < -1 ? -1 : x;
+              st.held = Math.round(x * step) / step;
+            }
+            o[n] = st.held;
+          }
+        }
+        return true;
+      }
+    }
+    registerProcessor('ism-crusher', Crusher);
+  `;
+
+  /* ============================================================
+     ONE-SHOTS
+     ============================================================ */
+
+  /** 敲石头 — stone hit: dry crack + low knock + debris grit */
+  function stone(ctx, dest, t, o = {}) {
+    const f = o.pitch || rnd(0.85, 1.15);
+    const out = ctx.createGain(); out.gain.value = (o.gain ?? 1) * 1.6; out.connect(dest);
+
+    const n = noiseSrc(ctx, t, 0.25);
+    const bp = filt(ctx, 'bandpass', 2600 * f, 0.9);
+    bp.frequency.setValueAtTime(2600 * f, t);
+    bp.frequency.exponentialRampToValueAtTime(650 * f, t + 0.08);
+    n.connect(bp).connect(env(ctx, t, 0.9, 0.002, 0.09)).connect(out);
+
+    const k = osc(ctx, 'sine', 220 * f, t, 0.15);
+    k.frequency.setValueAtTime(230 * f, t);
+    k.frequency.exponentialRampToValueAtTime(65 * f, t + 0.05);
+    k.connect(env(ctx, t, 0.75, 0.001, 0.07)).connect(out);
+
+    const n2 = noiseSrc(ctx, t + 0.012, 0.22);
+    const lp = filt(ctx, 'lowpass', 1300 * f, 0.5);
+    n2.connect(lp).connect(env(ctx, t + 0.012, 0.35, 0.005, 0.16)).connect(out);
+
+    // tiny secondary chip bouncing off
+    if (Math.random() < 0.6) {
+      const dt = rnd(0.07, 0.14);
+      const n3 = noiseSrc(ctx, t + dt, 0.08);
+      const bp3 = filt(ctx, 'bandpass', 3400 * f, 2);
+      n3.connect(bp3).connect(env(ctx, t + dt, 0.25, 0.001, 0.04)).connect(out);
+    }
+    return 0.45;
+  }
+
+  /** 敲管道 — hollow metal pipe: free-bar modal partials with beating + clank */
+  function pipe(ctx, dest, t, o = {}) {
+    const f0 = o.f0 || rnd(170, 430);
+    const ratios = [1, 2.756, 5.404, 8.933, 13.34];
+    const amps = [1, 0.62, 0.42, 0.24, 0.12];
+    const out = ctx.createGain(); out.gain.value = (o.gain ?? 1) * 0.45;
+    const hp = filt(ctx, 'highpass', 110);
+    out.connect(hp).connect(dest);
+
+    ratios.forEach((r, i) => {
+      const dec = 1.5 / (1 + i * 0.7);
+      [-1.6, 1.6].forEach(det => {
+        const oo = osc(ctx, 'sine', f0 * r * (1 + det / 1000), t, dec + 0.1);
+        arp(oo, f0 * r, t, dec);
+        oo.connect(env(ctx, t, amps[i] * 0.5, 0.002, dec)).connect(out);
+      });
+    });
+    // pipe resonance (air column) — hollow tone
+    const air = osc(ctx, 'triangle', f0 * 0.5, t, 0.5);
+    air.connect(filt(ctx, 'lowpass', 900)).connect(env(ctx, t, 0.35, 0.003, 0.35)).connect(out);
+
+    // clank excitation
+    const n = noiseSrc(ctx, t, 0.1);
+    const bp = filt(ctx, 'bandpass', f0 * 4, 2);
+    n.connect(bp).connect(env(ctx, t, 0.9, 0.001, 0.045)).connect(out);
+    return 2.0;
+  }
+
+  /** 机器撞击 — heavy machine impact: sub thud + distorted clang + slam noise */
+  function impact(ctx, dest, t, o = {}) {
+    const out = ctx.createGain(); out.gain.value = o.gain ?? 1; out.connect(dest);
+
+    const s = osc(ctx, 'sine', 110, t, 0.7);
+    s.frequency.setValueAtTime(115, t);
+    s.frequency.exponentialRampToValueAtTime(31, t + 0.18);
+    s.connect(env(ctx, t, 1.0, 0.003, 0.5)).connect(out);
+
+    const shaper = ctx.createWaveShaper();
+    shaper.curve = distCurve(ctx, 6);
+    shaper.oversample = '2x';
+    const cl = ctx.createGain(); cl.gain.value = 0.45;
+    [151, 387, 612, 1023, 1580, 2210].forEach((f, i) => {
+      const oo = osc(ctx, i < 2 ? 'triangle' : 'sine', f * rnd(0.98, 1.02), t, 1.3);
+      oo.connect(env(ctx, t, 0.55 / (1 + i * 0.5), 0.002, 0.95 - i * 0.1)).connect(shaper);
+    });
+    shaper.connect(cl).connect(filt(ctx, 'highpass', 90)).connect(out);
+
+    const n = noiseSrc(ctx, t, 0.3);
+    const lp = filt(ctx, 'lowpass', 5000, 0.7);
+    lp.frequency.setValueAtTime(5500, t);
+    lp.frequency.exponentialRampToValueAtTime(260, t + 0.22);
+    n.connect(lp).connect(env(ctx, t, 0.9, 0.002, 0.24)).connect(out);
+
+    // rattling aftermath
+    for (let i = 0; i < 3; i++) {
+      const dt = 0.12 + i * rnd(0.05, 0.09);
+      const nr = noiseSrc(ctx, t + dt, 0.06);
+      nr.connect(filt(ctx, 'bandpass', rnd(900, 2200), 3))
+        .connect(env(ctx, t + dt, 0.18 / (i + 1), 0.001, 0.035)).connect(out);
+    }
+    return 1.6;
+  }
+
+  /** 敲铃铛 — bell: inharmonic partials with independent decays */
+  function bell(ctx, dest, t, o = {}) {
+    const f0 = o.f0 || rnd(380, 640);
+    //           ratio  amp  decay
+    const P = [[0.5, 0.6, 4.0], [1, 1, 3.3], [1.183, 0.5, 2.6], [1.506, 0.5, 2.3],
+               [2, 0.4, 1.9], [2.514, 0.3, 1.5], [2.662, 0.25, 1.4], [3.011, 0.2, 1.2],
+               [4.166, 0.12, 0.9], [5.433, 0.08, 0.7]];
+    const out = ctx.createGain(); out.gain.value = (o.gain ?? 1) * 0.32; out.connect(dest);
+    P.forEach(([r, a, d]) => {
+      const oo = osc(ctx, 'sine', f0 * r * rnd(0.999, 1.001), t, d + 0.1);
+      if (r <= 2) arp(oo, f0 * r, t, d, [1, 1.25, 1.5, 2]);
+      oo.connect(env(ctx, t, a, 0.002, d)).connect(out);
+    });
+    const n = noiseSrc(ctx, t, 0.05);
+    n.connect(filt(ctx, 'bandpass', f0 * 3, 3)).connect(env(ctx, t, 0.5, 0.001, 0.03)).connect(out);
+    return 4.3;
+  }
+
+  /** 敲镲 — cymbal (808-style): 6 detuned squares + noise, clipped, hi-passed, dual envelope */
+  function cymbal(ctx, dest, t, o = {}) {
+    const decay = o.decay || rnd(1.6, 2.2);
+    const out = ctx.createGain(); out.gain.value = (o.gain ?? 1) * 1.3; out.connect(dest);
+    const mix = ctx.createGain(); mix.gain.value = 0.18;
+    [205.3, 304.4, 369.6, 522.7, 540, 800].forEach(f => {
+      osc(ctx, 'square', f * rnd(0.99, 1.01), t, decay + 0.3).connect(mix);
+    });
+    const n = noiseSrc(ctx, t, decay + 0.3);
+    const ng = ctx.createGain(); ng.gain.value = 0.7;
+    n.connect(ng).connect(mix);
+
+    const shaper = ctx.createWaveShaper();
+    shaper.curve = distCurve(ctx, 3);
+    const hp = filt(ctx, 'highpass', 6500, 0.5);
+    const bp = filt(ctx, 'bandpass', 9500, 0.7);
+    const bp2 = filt(ctx, 'bandpass', 3800, 1.2);
+    mix.connect(shaper).connect(hp);
+    hp.connect(env(ctx, t, 0.9, 0.001, 0.28)).connect(out);                 // bright edge
+    hp.connect(bp).connect(env(ctx, t, 0.5, 0.008, decay)).connect(out);     // shimmering body
+    hp.connect(bp2).connect(env(ctx, t, 0.25, 0.02, decay * 0.7)).connect(out); // metal wash
+    return decay + 0.6;
+  }
+
+  /** 牛铃 — cowbell (808-style): two squares 587/845 Hz, bandpass, quick-decay */
+  function cowbell(ctx, dest, t, o = {}) {
+    const f = o.pitch || rnd(0.97, 1.03);
+    const out = ctx.createGain(); out.gain.value = (o.gain ?? 1) * 0.6; out.connect(dest);
+    const bp = filt(ctx, 'bandpass', 1850 * f, 1.1);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(MIN, t);
+    g.gain.exponentialRampToValueAtTime(1, t + 0.002);
+    g.gain.exponentialRampToValueAtTime(0.35, t + 0.035);
+    g.gain.exponentialRampToValueAtTime(MIN, t + 0.42);
+    [587, 845].forEach(fr => {
+      const oo = osc(ctx, 'square', fr * f, t, 0.5);
+      oo.frequency.setValueAtTime(qf(fr * f * 1.03), t);
+      oo.frequency.exponentialRampToValueAtTime(qf(fr * f), t + 0.02);
+      arp(oo, fr * f, t + 0.03, 0.4);
+      oo.connect(bp);
+    });
+    const shaper = ctx.createWaveShaper();
+    shaper.curve = distCurve(ctx, 2);
+    bp.connect(g).connect(shaper).connect(out);
+    // stick click
+    const n = noiseSrc(ctx, t, 0.03);
+    n.connect(filt(ctx, 'highpass', 3000)).connect(env(ctx, t, 0.4, 0.001, 0.015)).connect(out);
+    return 0.6;
+  }
+
+  /** 机器喷气 — pressurised steam vent: valve pop + swept hiss */
+  function steam(ctx, dest, t, o = {}) {
+    const dur = o.dur || rnd(0.9, 1.3);
+    const out = ctx.createGain(); out.gain.value = o.gain ?? 1; out.connect(dest);
+
+    const n = noiseSrc(ctx, t, dur + 0.1);
+    const hp = filt(ctx, 'highpass', 600, 0.7);
+    hp.frequency.setValueAtTime(500, t);
+    hp.frequency.exponentialRampToValueAtTime(3800, t + 0.15);
+    hp.frequency.exponentialRampToValueAtTime(1400, t + dur);
+    const bp = filt(ctx, 'bandpass', 3000, 0.6);
+    bp.frequency.setValueAtTime(2800, t);
+    bp.frequency.exponentialRampToValueAtTime(6500, t + 0.2);
+    bp.frequency.exponentialRampToValueAtTime(2200, t + dur);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(MIN, t);
+    g.gain.exponentialRampToValueAtTime(0.85, t + 0.03);
+    g.gain.setValueAtTime(0.85, t + 0.25);
+    g.gain.exponentialRampToValueAtTime(MIN, t + dur);
+    n.connect(hp).connect(bp).connect(g).connect(out);
+
+    // low pressure body under the hiss
+    const n2 = noiseSrc(ctx, t, dur);
+    n2.connect(filt(ctx, 'bandpass', 450, 1.5)).connect(env(ctx, t, 0.3, 0.04, dur * 0.8)).connect(out);
+
+    // valve pop
+    const p = osc(ctx, 'square', 400, t, 0.1);
+    p.frequency.setValueAtTime(420, t);
+    p.frequency.exponentialRampToValueAtTime(70, t + 0.03);
+    p.connect(filt(ctx, 'lowpass', 1500)).connect(env(ctx, t, 0.28, 0.001, 0.045)).connect(out);
+    return dur + 0.3;
+  }
+
+
+  /** 铁砧 — anvil: bright inharmonic ring + hammer thunk + click */
+  function anvil(ctx, dest, t, o = {}) {
+    const f0 = o.f0 || rnd(1450, 1750);
+    const out = ctx.createGain(); out.gain.value = (o.gain ?? 1) * 0.5; out.connect(dest);
+    const P = [[1, 1, 1.3], [1.58, 0.55, 1.0], [2.36, 0.35, 0.8], [3.13, 0.22, 0.6], [4.42, 0.12, 0.4]];
+    P.forEach(([r, a, d]) => {
+      [-0.8, 0.8].forEach(det => {
+        const oo = osc(ctx, 'sine', f0 * r * (1 + det / 1000), t, d + 0.1);
+        arp(oo, f0 * r, t, d);
+        oo.connect(env(ctx, t, a * 0.5, 0.001, d)).connect(out);
+      });
+    });
+    const k = osc(ctx, 'sine', 180, t, 0.15);
+    k.frequency.setValueAtTime(190, t);
+    k.frequency.exponentialRampToValueAtTime(80, t + 0.05);
+    k.connect(env(ctx, t, 0.8, 0.001, 0.08)).connect(out);
+    const n = noiseSrc(ctx, t, 0.04);
+    n.connect(filt(ctx, 'highpass', 4000)).connect(env(ctx, t, 0.7, 0.0005, 0.02)).connect(out);
+    return 1.6;
+  }
+
+  /** 铁链 — chain: cascade of tiny link clinks over a low rattle */
+  function chain(ctx, dest, t, o = {}) {
+    const out = ctx.createGain(); out.gain.value = (o.gain ?? 1) * 1.2; out.connect(dest);
+    const hp = filt(ctx, 'highpass', 900); hp.connect(out);
+    const links = o.links || Math.round(rnd(10, 16));
+    let at = t;
+    for (let i = 0; i < links; i++) {
+      const f = rnd(2200, 6500);
+      const fade = 1 - (i / links) * 0.6;
+      const n = noiseSrc(ctx, at, 0.06);
+      n.connect(filt(ctx, 'bandpass', f, 9)).connect(env(ctx, at, rnd(0.4, 0.9) * fade, 0.001, 0.035)).connect(hp);
+      const s = osc(ctx, 'sine', f * rnd(0.9, 1.1), at, 0.08);
+      s.connect(env(ctx, at, 0.25 * fade, 0.001, 0.05)).connect(hp);
+      at += rnd(0.012, 0.05) * (1 + (i / links) * 1.5);
+    }
+    const n2 = noiseSrc(ctx, t, 0.5);
+    n2.connect(filt(ctx, 'bandpass', 700, 3)).connect(env(ctx, t, 0.3, 0.005, 0.4)).connect(out);
+    return at - t + 0.5;
+  }
+
+  /** 冲压机 — hydraulic press: hiss build-up, massive slam, exhaust */
+  const PRESS_SLAM_AT = 0.26;
+  function press(ctx, dest, t, o = {}) {
+    const out = ctx.createGain(); out.gain.value = o.gain ?? 1; out.connect(dest);
+    const h = noiseSrc(ctx, t, 0.3);
+    const hb = filt(ctx, 'bandpass', 1800, 1.5);
+    hb.frequency.setValueAtTime(2500, t);
+    hb.frequency.exponentialRampToValueAtTime(900, t + 0.25);
+    const hg = ctx.createGain();
+    hg.gain.setValueAtTime(MIN, t);
+    hg.gain.exponentialRampToValueAtTime(0.35, t + 0.05);
+    hg.gain.exponentialRampToValueAtTime(0.5, t + 0.22);
+    hg.gain.exponentialRampToValueAtTime(MIN, t + 0.27);
+    h.connect(hb).connect(hg).connect(out);
+
+    const ts = t + PRESS_SLAM_AT;
+    const s = osc(ctx, 'sine', 70, ts, 0.8);
+    s.frequency.setValueAtTime(75, ts);
+    s.frequency.exponentialRampToValueAtTime(24, ts + 0.25);
+    s.connect(env(ctx, ts, 1.1, 0.002, 0.6)).connect(out);
+    const n = noiseSrc(ctx, ts, 0.3);
+    const lp = filt(ctx, 'lowpass', 3000, 0.8);
+    lp.frequency.setValueAtTime(3500, ts);
+    lp.frequency.exponentialRampToValueAtTime(200, ts + 0.25);
+    n.connect(lp).connect(env(ctx, ts, 1.0, 0.001, 0.28)).connect(out);
+    const shaper = ctx.createWaveShaper(); shaper.curve = distCurve(ctx, 5);
+    const cg = ctx.createGain(); cg.gain.value = 0.35;
+    shaper.connect(cg).connect(out);
+    [95, 240, 410, 730].forEach((f, i) => {
+      const oo = osc(ctx, 'triangle', f * rnd(0.98, 1.02), ts, 0.8);
+      oo.connect(env(ctx, ts, 0.5 / (1 + i * 0.6), 0.002, 0.5 - i * 0.08)).connect(shaper);
+    });
+    const tr = ts + 0.35;
+    const r = noiseSrc(ctx, tr, 0.4);
+    r.connect(filt(ctx, 'highpass', 2500)).connect(env(ctx, tr, 0.3, 0.02, 0.3)).connect(out);
+    return 1.6;
+  }
+
+  /** 油桶 — oil drum: hollow resonant body, boom, lid boing, slap */
+  function drum(ctx, dest, t, o = {}) {
+    const f = o.pitch || rnd(0.9, 1.1);
+    const out = ctx.createGain(); out.gain.value = (o.gain ?? 1) * 0.9; out.connect(dest);
+    const ex = noiseSrc(ctx, t, 0.12);
+    const exg = env(ctx, t, 1, 0.001, 0.06);
+    ex.connect(exg);
+    [[118, 10, 0.9], [236, 9, 0.6], [402, 8, 0.4], [610, 7, 0.25]].forEach(([fr, q, a]) => {
+      const b = filt(ctx, 'bandpass', fr * f, q);
+      const g = ctx.createGain(); g.gain.value = a * 2;
+      exg.connect(b).connect(g).connect(out);
+    });
+    const s = osc(ctx, 'sine', 130 * f, t, 0.7);
+    s.frequency.setValueAtTime(140 * f, t);
+    s.frequency.exponentialRampToValueAtTime(68 * f, t + 0.12);
+    s.connect(env(ctx, t, 0.9, 0.002, 0.5)).connect(out);
+    [760, 1180, 1540].forEach((fr, i) => {
+      const oo = osc(ctx, 'sine', fr * f, t, 0.6);
+      oo.frequency.setValueAtTime(fr * f * 1.04, t);
+      oo.frequency.exponentialRampToValueAtTime(fr * f, t + 0.15);
+      oo.connect(env(ctx, t, 0.18 / (i + 1), 0.002, 0.45)).connect(out);
+    });
+    const n = noiseSrc(ctx, t, 0.05);
+    n.connect(filt(ctx, 'bandpass', 2500, 1)).connect(env(ctx, t, 0.5, 0.001, 0.03)).connect(out);
+    return 1.2;
+  }
+
+  /** 铁皮板 — sheet metal: wobbling resonant noise (thunder sheet) */
+  function sheet(ctx, dest, t, o = {}) {
+    const out = ctx.createGain(); out.gain.value = (o.gain ?? 1) * 1.5; out.connect(dest);
+    const dur = o.dur || 1.6;
+    const n = noiseSrc(ctx, t, dur + 0.2);
+    const ng = env(ctx, t, 1, 0.002, dur);
+    n.connect(ng);
+    const wob = osc(ctx, 'sine', 7, t, dur + 0.2);
+    const wg = ctx.createGain();
+    wg.gain.setValueAtTime(0, t);
+    wg.gain.linearRampToValueAtTime(0.18, t + 0.05);
+    wg.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    wob.connect(wg);
+    [[380, 12, 0.9], [860, 10, 0.7], [1650, 9, 0.5], [3100, 8, 0.35], [5200, 7, 0.2]].forEach(([f, q, a]) => {
+      const b = filt(ctx, 'bandpass', f, q);
+      const dg = ctx.createGain(); dg.gain.value = 600;   // cents of wobble
+      wg.connect(dg).connect(b.detune);
+      const g = ctx.createGain(); g.gain.value = a * 1.8;
+      ng.connect(b).connect(g).connect(out);
+    });
+    const sl = noiseSrc(ctx, t, 0.05);
+    sl.connect(filt(ctx, 'lowpass', 2000)).connect(env(ctx, t, 0.8, 0.001, 0.03)).connect(out);
+    const k = osc(ctx, 'sine', 90, t, 0.2);
+    k.frequency.setValueAtTime(90, t);
+    k.frequency.exponentialRampToValueAtTime(45, t + 0.1);
+    k.connect(env(ctx, t, 0.5, 0.002, 0.15)).connect(out);
+    return dur + 0.5;
+  }
+
+  /** 汽笛 — steam whistle: chord of partials with vibrato, pitch scoop, breath */
+  function whistle(ctx, dest, t, o = {}) {
+    const f = o.f0 || rnd(620, 760);
+    const dur = o.dur || rnd(0.9, 1.4);
+    const out = ctx.createGain(); out.gain.value = (o.gain ?? 1) * 0.35; out.connect(dest);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(MIN, t);
+    g.gain.exponentialRampToValueAtTime(1, t + 0.09);
+    g.gain.setValueAtTime(1, t + dur - 0.25);
+    g.gain.exponentialRampToValueAtTime(MIN, t + dur);
+    g.connect(out);
+    const vib = osc(ctx, 'sine', 5.5, t, dur + 0.1);
+    const vg = ctx.createGain(); vg.gain.value = 14;      // cents
+    vib.connect(vg);
+    [[1, 1, 'triangle'], [1.26, 0.5, 'sine'], [1.5, 0.6, 'triangle'], [2, 0.25, 'sine'], [3.02, 0.1, 'sine']].forEach(([r, a, type]) => {
+      const oo = osc(ctx, type, f * r, t, dur + 0.1);
+      oo.frequency.setValueAtTime(f * r * 0.8, t);
+      oo.frequency.exponentialRampToValueAtTime(f * r, t + 0.12);
+      oo.frequency.setValueAtTime(f * r, t + dur - 0.15);
+      oo.frequency.exponentialRampToValueAtTime(f * r * 0.9, t + dur);
+      vg.connect(oo.detune);
+      const ag = ctx.createGain(); ag.gain.value = a;
+      oo.connect(ag).connect(g);
+    });
+    const n = noiseSrc(ctx, t, dur + 0.1);
+    const bg = ctx.createGain(); bg.gain.value = 0.3;
+    n.connect(filt(ctx, 'bandpass', f * 1.5, 3)).connect(bg).connect(g);
+    return dur + 0.5;
+  }
+
+  /** 电焊 — welding: arc buzz with tremolo, hiss, dense crackles */
+  function welder(ctx, dest, t, o = {}) {
+    const dur = o.dur || rnd(0.5, 0.9);
+    const out = ctx.createGain(); out.gain.value = (o.gain ?? 1) * 0.7; out.connect(dest);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(MIN, t);
+    g.gain.exponentialRampToValueAtTime(0.5, t + 0.02);
+    g.gain.setValueAtTime(0.5, t + dur - 0.05);
+    g.gain.exponentialRampToValueAtTime(MIN, t + dur);
+    g.connect(out);
+    const b1 = osc(ctx, 'sawtooth', 100, t, dur + 0.1);
+    const b2 = osc(ctx, 'square', 120, t, dur + 0.1);
+    const bl = filt(ctx, 'lowpass', 1800, 1);
+    const bg = ctx.createGain(); bg.gain.value = 0.5;
+    const trem = osc(ctx, 'square', rnd(28, 40), t, dur + 0.1);
+    const tg = ctx.createGain(); tg.gain.value = 0.4;
+    trem.connect(tg).connect(bg.gain);
+    b1.connect(bl); b2.connect(bl); bl.connect(bg).connect(g);
+    const n = noiseSrc(ctx, t, dur + 0.1);
+    const hg = ctx.createGain(); hg.gain.value = 0.25;
+    n.connect(filt(ctx, 'highpass', 3000)).connect(hg).connect(g);
+    let at = t + 0.01;
+    while (at < t + dur) {
+      const c = noiseSrc(ctx, at, 0.012);
+      c.connect(filt(ctx, 'highpass', rnd(2500, 6000))).connect(env(ctx, at, rnd(0.3, 1), 0.0005, 0.006)).connect(out);
+      at += rnd(0.006, 0.04);
+    }
+    return dur + 0.3;
+  }
+
+  /** 螺栓掉落 — falling bolts: a few bouncing bolts with shrinking bounce intervals */
+  function bolts(ctx, dest, t, o = {}) {
+    const out = ctx.createGain(); out.gain.value = (o.gain ?? 1) * 1.0; out.connect(dest);
+    const count = o.count || Math.round(rnd(2, 4));
+    let end = t;
+    for (let b = 0; b < count; b++) {
+      let at = t + b * rnd(0.03, 0.12);
+      let gap = rnd(0.12, 0.2);
+      let amp = 1;
+      const f = rnd(1800, 3400);
+      for (let i = 0; i < 7 && amp > 0.08; i++) {
+        const n = noiseSrc(ctx, at, 0.05);
+        n.connect(filt(ctx, 'bandpass', f * rnd(0.95, 1.05), 7)).connect(env(ctx, at, 0.7 * amp, 0.001, 0.03)).connect(out);
+        const s = osc(ctx, 'sine', f * 1.5, at, 0.1);
+        s.connect(env(ctx, at, 0.3 * amp, 0.001, 0.06)).connect(out);
+        const k = osc(ctx, 'sine', 320, at, 0.06);
+        k.frequency.setValueAtTime(320, at);
+        k.frequency.exponentialRampToValueAtTime(150, at + 0.03);
+        k.connect(env(ctx, at, 0.35 * amp, 0.001, 0.04)).connect(out);
+        at += gap; gap *= rnd(0.55, 0.7); amp *= 0.65;
+      }
+      end = Math.max(end, at);
+    }
+    const r = noiseSrc(ctx, end, 0.25);
+    r.connect(filt(ctx, 'bandpass', 2500, 4)).connect(env(ctx, end, 0.15, 0.01, 0.2)).connect(out);
+    return end - t + 0.5;
+  }
+
+  /* ============================================================
+     LOOPS
+     ============================================================ */
+
+  /** 机器转动 — rotating machinery: motor hum + whir + rhythmic clanks */
+  function startRotation(ctx, dest, t, o = {}) {
+    let speed = o.speed || 1;                 // revolutions per second
+    const out = ctx.createGain();
+    out.gain.setValueAtTime(MIN, t);
+    out.gain.exponentialRampToValueAtTime(0.75, t + 0.9);
+    out.connect(dest);
+
+    // motor
+    const motor = ctx.createOscillator(); setType(ctx, motor, 'sawtooth');
+    motor.frequency.setValueAtTime(28, t);
+    motor.frequency.exponentialRampToValueAtTime(52 * speed, t + 1.6);
+    const mlp = filt(ctx, 'lowpass', 340, 4);
+    const lfo = ctx.createOscillator(); lfo.frequency.setValueAtTime(2.2 * speed, t);
+    const lfoG = ctx.createGain(); lfoG.gain.value = 140;
+    lfo.connect(lfoG).connect(mlp.frequency);
+    const mg = ctx.createGain(); mg.gain.value = 0.5;
+    motor.connect(mlp).connect(mg).connect(out);
+
+    // belt whir
+    const n = ctx.createBufferSource(); n.buffer = noiseBuffer(ctx); n.loop = true;
+    const wbp = filt(ctx, 'bandpass', 1200, 5);
+    const lfo2 = ctx.createOscillator(); lfo2.frequency.setValueAtTime(speed * 1.1, t);
+    const l2g = ctx.createGain(); l2g.gain.value = 550;
+    lfo2.connect(l2g).connect(wbp.frequency);
+    const wg = ctx.createGain(); wg.gain.value = 0.22;
+    n.connect(wbp).connect(wg).connect(out);
+
+    // gear grind (lower noise, pulsing)
+    const n2 = ctx.createBufferSource(); n2.buffer = noiseBuffer(ctx); n2.loop = true;
+    const gbp = filt(ctx, 'bandpass', 380, 3);
+    const gg = ctx.createGain(); gg.gain.value = 0.18;
+    const lfo3 = ctx.createOscillator(); lfo3.type = 'square'; lfo3.frequency.setValueAtTime(speed * 4, t);
+    const l3g = ctx.createGain(); l3g.gain.value = 0.1;
+    lfo3.connect(l3g).connect(gg.gain);
+    n2.connect(gbp).connect(gg).connect(out);
+
+    [motor, lfo, lfo2, lfo3, n, n2].forEach(x => x.start(t));
+
+    // rhythmic clanks — scheduled ahead in chunks
+    let nextClank = t + 0.4;
+    let clankIndex = 0;
+    function clank(at, accent) {
+      const c = noiseSrc(ctx, at, 0.09);
+      c.connect(filt(ctx, 'bandpass', accent ? 900 : 1400, 6))
+        .connect(env(ctx, at, accent ? 0.5 : 0.28, 0.001, 0.06)).connect(out);
+      const k = osc(ctx, 'sine', accent ? 140 : 210, at, 0.12);
+      k.connect(env(ctx, at, accent ? 0.45 : 0.2, 0.001, 0.07)).connect(out);
+    }
+    function scheduleUntil(until) {
+      while (nextClank < until) {
+        clank(nextClank, clankIndex % 2 === 0);
+        clankIndex++;
+        nextClank += 0.5 / speed;
+      }
+    }
+    function setParam(v) {
+      speed = v;
+      const now = ctx.currentTime;
+      motor.frequency.cancelScheduledValues(now);
+      motor.frequency.setTargetAtTime(52 * speed, now, 0.4);
+      lfo.frequency.setTargetAtTime(2.2 * speed, now, 0.3);
+      lfo2.frequency.setTargetAtTime(1.1 * speed, now, 0.3);
+      lfo3.frequency.setTargetAtTime(4 * speed, now, 0.3);
+    }
+    function stop(at) {
+      out.gain.cancelScheduledValues(at);
+      out.gain.setValueAtTime(out.gain.value || 0.75, at);
+      out.gain.exponentialRampToValueAtTime(MIN, at + 0.7);
+      motor.frequency.cancelScheduledValues(at);
+      motor.frequency.setTargetAtTime(20, at, 0.35);
+      [motor, lfo, lfo2, lfo3, n, n2].forEach(x => x.stop(at + 0.8));
+      nextClank = Infinity;
+    }
+    return { stop, scheduleUntil, setParam };
+  }
+
+  /** 沉闷的机器声 — dull, muffled machine room drone */
+  function startDrone(ctx, dest, t, o = {}) {
+    let muffle = o.muffle ?? 0.5;             // 0 = brighter, 1 = very muffled
+    const cutoff = () => 900 - muffle * 720;  // 900 → 180 Hz
+    const out = ctx.createGain();
+    out.gain.setValueAtTime(MIN, t);
+    out.gain.exponentialRampToValueAtTime(0.85, t + 1.6);
+    const lp = filt(ctx, 'lowpass', cutoff(), 0.8);
+    lp.connect(out); out.connect(dest);
+
+    // mains hum stack
+    const hum = ctx.createGain(); hum.gain.value = 0.55;
+    const h1 = osc0(ctx, 'sine', 50);
+    const h2 = osc0(ctx, 'triangle', 100); const h2g = ctx.createGain(); h2g.gain.value = 0.35;
+    const h3 = osc0(ctx, 'sine', 149.3);    const h3g = ctx.createGain(); h3g.gain.value = 0.12;
+    h1.connect(hum); h2.connect(h2g).connect(hum); h3.connect(h3g).connect(hum);
+    const am = osc0(ctx, 'sine', 0.37); const amg = ctx.createGain(); amg.gain.value = 0.2;
+    am.connect(amg).connect(hum.gain);
+    hum.connect(lp);
+
+    // heavy rumble
+    const rum = osc0(ctx, 'sawtooth', 27.5);
+    const rlp = filt(ctx, 'lowpass', 85, 1);
+    const rg = ctx.createGain(); rg.gain.value = 0.45;
+    rum.connect(rlp).connect(rg).connect(lp);
+
+    // brown-ish noise floor
+    const n = ctx.createBufferSource(); n.buffer = noiseBuffer(ctx); n.loop = true;
+    const nl1 = filt(ctx, 'lowpass', 140); const nl2 = filt(ctx, 'lowpass', 160);
+    const ng = ctx.createGain(); ng.gain.value = 1.4;
+    n.connect(nl1).connect(nl2).connect(ng).connect(lp);
+
+    // ventilation swoosh, slowly wandering
+    const v = ctx.createBufferSource(); v.buffer = noiseBuffer(ctx); v.loop = true;
+    const vbp = filt(ctx, 'bandpass', 320, 2.5);
+    const vlfo = osc0(ctx, 'sine', 0.11); const vlg = ctx.createGain(); vlg.gain.value = 120;
+    vlfo.connect(vlg).connect(vbp.frequency);
+    const vg = ctx.createGain(); vg.gain.value = 0.16;
+    v.connect(vbp).connect(vg).connect(lp);
+
+    const srcs = [h1, h2, h3, am, rum, n, v, vlfo];
+    srcs.forEach(x => x.start(t));
+
+    // periodic muffled thud + random clunks
+    let nextThud = t + 0.8;
+    let nextClunk = t + rnd(2, 4);
+    function thud(at) {
+      const s = osc(ctx, 'sine', 62, at, 0.5);
+      s.frequency.setValueAtTime(66, at);
+      s.frequency.exponentialRampToValueAtTime(38, at + 0.2);
+      s.connect(env(ctx, at, 0.6, 0.005, 0.38)).connect(lp);
+    }
+    function clunk(at) {
+      const c = noiseSrc(ctx, at, 0.2);
+      c.connect(filt(ctx, 'lowpass', 320)).connect(env(ctx, at, 0.45, 0.004, 0.16)).connect(lp);
+      const k = osc(ctx, 'triangle', rnd(90, 160), at, 0.3);
+      k.connect(env(ctx, at, 0.25, 0.003, 0.22)).connect(lp);
+    }
+    function scheduleUntil(until) {
+      while (nextThud < until) { thud(nextThud); nextThud += 0.8; }
+      while (nextClunk < until) { clunk(nextClunk); nextClunk += rnd(1.8, 5); }
+    }
+    function setParam(v) {
+      muffle = v;
+      lp.frequency.setTargetAtTime(cutoff(), ctx.currentTime, 0.2);
+    }
+    function stop(at) {
+      out.gain.cancelScheduledValues(at);
+      out.gain.setValueAtTime(out.gain.value || 0.85, at);
+      out.gain.exponentialRampToValueAtTime(MIN, at + 1.0);
+      srcs.forEach(x => x.stop(at + 1.1));
+      nextThud = Infinity; nextClunk = Infinity;
+    }
+    return { stop, scheduleUntil, setParam };
+  }
+
+  /** 传送带 — conveyor belt: rubber rumble, motor, roller clicks, squeaks */
+  function startConveyor(ctx, dest, t, o = {}) {
+    let speed = o.speed || 1;
+    const out = ctx.createGain();
+    out.gain.setValueAtTime(MIN, t);
+    out.gain.exponentialRampToValueAtTime(0.7, t + 0.6);
+    out.connect(dest);
+
+    const n = ctx.createBufferSource(); n.buffer = noiseBuffer(ctx); n.loop = true;
+    const lp = filt(ctx, 'lowpass', 260, 0.8);
+    const ng = ctx.createGain(); ng.gain.value = 0.9;
+    const am = osc0(ctx, 'sine', 3 * speed);
+    const amg = ctx.createGain(); amg.gain.value = 0.3;
+    am.connect(amg).connect(ng.gain);
+    n.connect(lp).connect(ng).connect(out);
+
+    const m = osc0(ctx, 'square', 60);
+    const mlp = filt(ctx, 'lowpass', 220, 2);
+    const mg = ctx.createGain(); mg.gain.value = 0.18;
+    m.connect(mlp).connect(mg).connect(out);
+
+    const n2 = ctx.createBufferSource(); n2.buffer = noiseBuffer(ctx); n2.loop = true;
+    const bp = filt(ctx, 'bandpass', 1800, 2);
+    const n2g = ctx.createGain(); n2g.gain.value = 0.05;
+    n2.connect(bp).connect(n2g).connect(out);
+
+    const srcs = [n, am, m, n2];
+    srcs.forEach(x => x.start(t));
+
+    let nextClick = t + 0.2, nextSqueak = t + rnd(1.5, 3);
+    function click(at) {
+      const c = noiseSrc(ctx, at, 0.04);
+      c.connect(filt(ctx, 'bandpass', rnd(1100, 1500), 5)).connect(env(ctx, at, 0.18, 0.001, 0.02)).connect(out);
+    }
+    function squeak(at) {
+      const s = osc(ctx, 'sine', rnd(2200, 3200), at, 0.25);
+      const v = osc(ctx, 'sine', 18, at, 0.25);
+      const vg = ctx.createGain(); vg.gain.value = 60;
+      v.connect(vg).connect(s.detune);
+      s.connect(env(ctx, at, 0.12, 0.03, 0.18)).connect(out);
+    }
+    function scheduleUntil(until) {
+      while (nextClick < until) { click(nextClick); nextClick += 0.25 / speed; }
+      while (nextSqueak < until) { squeak(nextSqueak); nextSqueak += rnd(1.5, 4) / speed; }
+    }
+    function setParam(v) {
+      speed = v;
+      const now = ctx.currentTime;
+      am.frequency.setTargetAtTime(3 * speed, now, 0.3);
+      m.frequency.setTargetAtTime(60 * (0.7 + 0.3 * speed), now, 0.3);
+    }
+    function stop(at) {
+      out.gain.cancelScheduledValues(at);
+      out.gain.setValueAtTime(out.gain.value || 0.7, at);
+      out.gain.exponentialRampToValueAtTime(MIN, at + 0.5);
+      srcs.forEach(x => x.stop(at + 0.6));
+      nextClick = Infinity; nextSqueak = Infinity;
+    }
+    return { stop, scheduleUntil, setParam };
+  }
+
+  function osc0(ctx, type, f) {
+    const o = ctx.createOscillator(); setType(ctx, o, type); o.frequency.value = qf(f); return o;
+  }
+
+
+  /* ============================================================
+     LIVE RECORDER — taps a node and accumulates PCM
+     ============================================================ */
+  function createRecorder(ctx, source) {
+    const proc = ctx.createScriptProcessor(4096, 2, 2);
+    const sink = ctx.createGain(); sink.gain.value = 0;
+    const chunks = [[], []];
+    let recording = false, frames = 0;
+    proc.onaudioprocess = e => {
+      if (!recording) return;
+      for (let c = 0; c < 2; c++) chunks[c].push(new Float32Array(e.inputBuffer.getChannelData(c)));
+      frames += e.inputBuffer.length;
+    };
+    source.connect(proc); proc.connect(sink).connect(ctx.destination);
+    return {
+      start() { chunks[0].length = 0; chunks[1].length = 0; frames = 0; recording = true; },
+      stop() {
+        recording = false;
+        const chans = chunks.map(list => {
+          const a = new Float32Array(frames); let off = 0;
+          for (const b of list) { a.set(b, off); off += b.length; }
+          return a;
+        });
+        return { chans, sampleRate: ctx.sampleRate, frames };
+      },
+      get recording() { return recording; },
+      get seconds() { return frames / ctx.sampleRate; },
+    };
+  }
+
+  /* ============================================================
+     ZIP (store-only) — for hosts whose download allowlist lacks .wav
+     ============================================================ */
+  const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  function crc32(u8) {
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < u8.length; i++) c = CRC_TABLE[(c ^ u8[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+  function makeZip(entries) {
+    const enc = new TextEncoder();
+    const parts = [], central = [];
+    let offset = 0;
+    const u16 = v => [v & 255, (v >>> 8) & 255];
+    const u32 = v => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+    for (const { name, data } of entries) {
+      const nameB = enc.encode(name);
+      const crc = crc32(data);
+      const local = new Uint8Array([
+        ...u32(0x04034b50), ...u16(20), ...u16(0x0800), ...u16(0), ...u16(0), ...u16(0x21),
+        ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(nameB.length), ...u16(0), ...nameB]);
+      central.push(new Uint8Array([
+        ...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0x0800), ...u16(0), ...u16(0), ...u16(0x21),
+        ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(nameB.length), ...u16(0), ...u16(0),
+        ...u16(0), ...u16(0), ...u32(0), ...u32(offset), ...nameB]));
+      parts.push(local, data);
+      offset += local.length + data.length;
+    }
+    const cdSize = central.reduce((a, b) => a + b.length, 0);
+    const eocd = new Uint8Array([
+      ...u32(0x06054b50), ...u16(0), ...u16(0), ...u16(entries.length), ...u16(entries.length),
+      ...u32(cdSize), ...u32(offset), ...u16(0)]);
+    return new Blob([...parts, ...central, eocd], { type: 'application/zip' });
+  }
+
+  /* ============================================================
+     OFFLINE RENDER → WAV
+     ============================================================ */
+  async function renderOneShot(fn, opts = {}, sampleRate = 44100) {
+    const probe = new OfflineAudioContext(2, sampleRate, sampleRate);
+    // dry run to learn duration (cheap: nodes only)
+    const dur = fn(probe, probe.createGain(), 0, opts) + 1.2; // + reverb tail
+    const oc = new OfflineAudioContext(2, Math.ceil(sampleRate * dur), sampleRate);
+    const m = buildMaster(oc);
+    fn(oc, m.input, 0.02, opts);
+    const buf = await oc.startRendering();
+    if (chip.on) crushBufferInPlace(buf);
+    return buf;
+  }
+  async function renderLoop(startFn, opts = {}, seconds = 6, sampleRate = 44100) {
+    const oc = new OfflineAudioContext(2, Math.ceil(sampleRate * seconds), sampleRate);
+    const m = buildMaster(oc);
+    const h = startFn(oc, m.input, 0.02, opts);
+    h.scheduleUntil(seconds - 1.2);
+    h.stop(seconds - 1.2);
+    const buf = await oc.startRendering();
+    if (chip.on) crushBufferInPlace(buf);
+    return buf;
+  }
+  function encodeWAV(buf) {
+    const chans = [];
+    for (let c = 0; c < buf.numberOfChannels; c++) chans.push(buf.getChannelData(c));
+    return encodeWAVChannels(chans, buf.sampleRate);
+  }
+  function encodeWAVChannels(chans, sr) {
+    const ch = chans.length, len = chans[0].length;
+    const bytes = 44 + len * ch * 2;
+    const ab = new ArrayBuffer(bytes);
+    const v = new DataView(ab);
+    const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    str(0, 'RIFF'); v.setUint32(4, bytes - 8, true); str(8, 'WAVE');
+    str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, ch, true);
+    v.setUint32(24, sr, true); v.setUint32(28, sr * ch * 2, true); v.setUint16(32, ch * 2, true);
+    v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, len * ch * 2, true);
+    let off = 44;
+    for (let i = 0; i < len; i++) {
+      for (let c = 0; c < ch; c++) {
+        const s = Math.max(-1, Math.min(1, chans[c][i]));
+        v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        off += 2;
+      }
+    }
+    return new Blob([ab], { type: 'audio/wav' });
+  }
+
+  return {
+    buildMaster,
+    stone, pipe, impact, bell, cymbal, cowbell, steam,
+    anvil, chain, press, drum, sheet, whistle, welder, bolts,
+    PRESS_SLAM_AT,
+    startRotation, startDrone, startConveyor,
+    createRecorder, makeZip,
+    chip, setChip, crushBufferInPlace,
+    renderOneShot, renderLoop, encodeWAV, encodeWAVChannels,
+  };
+})();

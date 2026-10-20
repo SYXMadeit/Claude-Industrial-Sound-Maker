@@ -1,0 +1,30 @@
+# Keeps a rolling "latest" release whose asset is the single-file offline build,
+# so the README's download button always points at the newest version.
+name: Publish offline build
+on:
+  push:
+    branches: [main]
+    paths: ['dist/**']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Move the "latest" tag to this commit
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git tag -f latest
+          git push -f origin latest
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Industrial Sound Maker (offline build)
+          body: |
+            单文件离线版：下载 `industrial-sound-maker.html`，双击用浏览器打开即可，无需联网。
+            Single-file offline build: download `industrial-sound-maker.html` and open it in any browser.
+          files: dist/industrial-sound-maker.html
+          prerelease: false

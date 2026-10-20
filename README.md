@@ -1,2 +1,133 @@
 # Claude-Industrial-Sound-Maker
-Play with some industrial core sound.
+
+工业声音生成器 · Industrial Sound Maker · Play with some industrial core sound.
+
+<p align="center">
+  <a href="https://majmanx.github.io/Claude-Industrial-Sound-Maker/"><img alt="在线玩 · Play now" src="https://img.shields.io/badge/%E2%96%B6%20%E5%9C%A8%E7%BA%BF%E7%8E%A9%20%C2%B7%20PLAY%20NOW-e8792b?style=for-the-badge&logoColor=white"></a>
+  &nbsp;
+  <a href="https://github.com/majmanx/Claude-Industrial-Sound-Maker/releases/latest/download/industrial-sound-maker.html"><img alt="下载离线版 · Download" src="https://img.shields.io/badge/%E2%AC%87%20%E4%B8%8B%E8%BD%BD%E7%A6%BB%E7%BA%BF%E7%89%88%20%C2%B7%20DOWNLOAD-5cff7a?style=for-the-badge&labelColor=1f3a26"></a>
+  &nbsp;
+  <a href="https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fmajmanx%2FClaude-Industrial-Sound-Maker"><img alt="Deploy with Vercel" src="https://img.shields.io/badge/%E2%96%B2%20%E9%83%A8%E7%BD%B2%E5%88%B0%20VERCEL-000000?style=for-the-badge&logo=vercel&logoColor=white"></a>
+</p>
+
+<p align="center"><img src="docs/screenshot.png" alt="Industrial Sound Maker" width="860"></p>
+
+一个纯前端页面，用 Web Audio API 实时合成工业声音，不依赖任何采样文件。像素风的工厂场景会随每个声音动起来（喷气、冒火花、齿轮转、传送带跑），整个界面都是像素化的，支持 8 种语言，还有一个 8-BIT 复古模式。
+
+**三种玩法**
+
+| | 怎么用 |
+|---|---|
+| ▶ **在线玩** | 点上面的按钮直接打开网页版（GitHub Pages）。手机浏览器里选「添加到主屏幕」、电脑 Chrome/Edge 地址栏点「安装」，就能像独立应用一样打开并离线使用。 |
+| ⬇ **下载离线版** | 一个 HTML 文件，双击用浏览器打开即可，不需要联网，录音和 WAV 导出都能用。 |
+| ▲ **部署到 Vercel** | 一键把仓库部署到你自己的 Vercel 账号，拿到一个 `*.vercel.app` 网址。 |
+
+## 运行
+
+直接用浏览器打开 `index.html`，或者起一个静态服务器：
+
+```bash
+npx serve .
+# 或
+python3 -m http.server 8000
+```
+
+首次需要点击「启动机器」以解锁浏览器音频。`dist/industrial-sound-maker.html` 是打包好的单文件版本（字体、样式、脚本全部内联），可以随便丢到任何地方托管。
+
+## 声音
+
+敲击（键盘 1–7、Q–I）：
+
+| 键 | 名称 | 合成方式 | 场景反应 |
+|----|------|----------|----------|
+| 1 | 敲石头 | 带通噪声裂响 + 低频敲击 + 碎屑颗粒 | 石头跳起、扬尘 |
+| 2 | 敲管道 | 自由梁模态分音（1 : 2.76 : 5.40 : 8.93）微失谐拍频 + 空腔共鸣 | 管道闪亮、火花 |
+| 3 | 机器撞击 | 次低音下潜 + 失真金属分音 + 噪声砸击 + 余震碎响 | 震屏、面板闪、火花 |
+| 4 | 敲铃铛 | 10 个非谐波分音，各自独立衰减 | 铃铛摆动 |
+| 5 | 敲镲 | 808 风格 6 路方波 + 噪声，削波后高通，双包络 | 镲片抖动发亮 |
+| 6 | 牛铃 | 808 风格 587 / 845 Hz 方波，带通 + 快衰减 | 牛铃摆动 |
+| 7 | 机器喷气 | 阀门爆音 + 频率扫掠嘶声 | 喷气口开盖、大团蒸汽 |
+| Q | 铁砧 | 高频非谐波长鸣 + 锤击闷响 + 点击 | 铁砧发白、火花 |
+| W | 铁链 | 十余个随机分布的高频叮当 + 低频哗啦 | 吊链晃动、抖动 |
+| E | 冲压机 | 液压嘶声蓄力 0.26 s → 巨大砸击 → 排气 | 活塞下压、震屏、扬尘 |
+| R | 油桶 | 噪声激励的多重带通共鸣 + 低频轰 + 桶盖弹响 | 油桶晃动、凹陷闪光 |
+| T | 铁皮板 | 5 路带通噪声带 7 Hz 音高抖动（雷声板） | 铁皮波浪抖动 |
+| Y | 汽笛 | 5 分音和弦 + 颤音 + 起音滑音 + 气息噪声 | 汽笛发光、冒小蒸汽 |
+| U | 电焊 | 锯齿/方波电弧嗡鸣 + 颤音 + 嘶声 + 密集噼啪 | 电弧闪光、火花雨、墙面蓝光 |
+| I | 螺栓掉落 | 2–4 颗螺栓，弹跳间隔递减 | 螺栓从托盘滚落弹跳 |
+
+循环机器（键盘 8、9、0，均带实时参数）：
+
+| 键 | 名称 | 合成方式 | 参数 |
+|----|------|----------|------|
+| 8 | 机器转动 | 锯齿马达 + LFO 皮带呼啸 + 齿轮研磨 + 节奏叮当 | 转速 |
+| 9 | 沉闷的机器声 | 50/100/150 Hz 嗡鸣 + 27.5 Hz 隆隆 + 低通噪声底 + 周期闷响 | 沉闷程度 |
+| 0 | 传送带 | 橡胶带隆隆 + 马达 + 滚轮咔哒 + 偶发吱嘎 | 速度 |
+
+所有声音经过共享的「车间混响」（生成式脉冲响应卷积）和压缩器总线，每次敲击带轻微随机变化。
+
+## 8-BIT 模式（键盘 P）
+
+工业声 + 像素画，再配一个复古 8-bit 音色开关才完整。开启后两层同时生效：
+
+- **合成层**：所有正弦/锯齿振荡器换成脉冲波（脉宽 12.5% / 25% / 50% 可选），噪声源换成 NES 式 15-bit LFSR 采样保持噪声，音高量化到半音 / 五声 / 大调音阶，包络改为按帧率阶梯变化（默认 60 fps，像老游戏机每帧更新一次音量）。铃铛、管道、铁砧、牛铃这些有音高的敲击可加琶音（0–40 Hz），瞬间变成金币音。
+- **总线层**：在总线末端做位深压缩（2–12 bit）与采样率降频（2–44.1 kHz），「噪点」在量化前加入抖动噪声制造颗粒感。录制和 WAV 导出都经过同样的处理。
+
+所有参数实时可调；关闭开关即恢复原始音色。
+
+## 功能
+
+- **敲击板 / 机器开关**：点击、键盘触发，键位按物理按键映射，与输入法布局无关。
+- **像素场景可点击**：喷气口、汽笛、铃铛、牛铃、镲、吊链、焊枪、铁皮板、管道、铁砧、石头、螺栓托盘、冲压机、指示灯（沉闷机器声）、机器体、齿轮（转动）、油桶、传送带。
+- **录制**：顶部「● 录制」实时记录总线输出，停止后直接下载 16-bit 立体声 WAV。
+- **WAV 导出**：每个音色用 OfflineAudioContext 离线渲染（含混响尾音）并下载；循环音色导出 6 秒。
+- **音序器**：16 步 × 15 音色，BPM 50–220，摇摆（swing）0–60%，自带 industrial 预设，支持随机与清空，空格键播放/停止。
+- **多语言**：中文、English、Español、Italiano、Deutsch、日本語、한국어、العربية（RTL 布局）。跟随浏览器语言，可手动切换并记住。
+- **报错 / 诊断**：顶部「报错」打开诊断面板：实时输出电平表、音频上下文状态、压缩引擎（AudioWorklet 或 ScriptProcessor 回退）、「测试音」（一段直通扬声器、一段经过总线）、「重启音频」、错误日志与一键「复制报告」。手机上没声时先按测试音：直通也没声就是系统静音键、媒体音量或蓝牙输出的问题。
+- **音频自愈**：iOS 在来电或切换应用后会把音频上下文置为 interrupted，页面在任何触摸、点击、按键、切回前台时自动恢复，敲击后若仍未运行会提示点一下屏幕。
+- **托管说明**：在 claude.ai 的 Artifact 里下载会被打包成 ZIP（内含 WAV），因为托管环境的下载白名单不含 `.wav`。
+
+## 部署
+
+页面是纯静态文件，没有任何第三方请求（字体全部内联），放到任何静态托管都能跑，也支持 PWA「添加到主屏幕」离线使用。
+
+**海外（GitHub Pages）**：仓库已带 `.github/workflows/pages.yml`，另有 `release.yml` 在 `dist/` 变动时自动把单文件离线版挂到 Releases 的 `latest`。在 GitHub 仓库 Settings → Pages 把 Source 设为「GitHub Actions」，之后每次推送 `main` 自动部署到 `https://<用户名>.github.io/Claude-Industrial-Sound-Maker/`。
+
+**Vercel**：点 README 顶部「部署到 Vercel」，零配置（静态站点，根目录即站点）。
+
+**国内**：GitHub Pages / Vercel 在大陆访问不稳定。把仓库根目录（或 `dist/industrial-sound-maker.html` 单文件）上传到阿里云 OSS / 腾讯云 COS 开启静态网站托管并接 CDN 即可；绑定自己的域名需要先完成 ICP 备案。发新版本时记得把 `sw.js` 里的 `CACHE` 版本号加一，老用户才会更新。
+
+**App 壳**：如需上架应用商店，可用 Capacitor 把本目录打包为 iOS / Android 应用；Web Audio 在 WKWebView 与 Android WebView 中均可用。
+
+## 字体
+
+界面文字使用 [缝合像素字体 Fusion Pixel 12px](https://github.com/TakWolf/fusion-pixel-font)（OFL-1.1），按界面实际用到的字符做了子集，三个语言变体（SC / JP / KR）总共约 26 KB，以 data URI 内联在 `css/fonts.css`。阿拉伯文没有像素字体，内联了 Noto Kufi Arabic（OFL）的子集，因此页面不依赖 Google Fonts，在大陆也能正常加载。
+
+改了文案之后重新生成字体子集：
+
+```bash
+pip install fonttools brotli
+python3 tools/subset-fonts.py        # 会从 npm registry 与 Google Fonts 下载源字体
+python3 tools/build-artifact.py      # 重新打包 dist/ 单文件
+```
+
+## 结构
+
+```
+index.html              页面骨架
+css/style.css           像素化样式（无圆角、缺角裁切、内凹斜面）
+css/fonts.css           生成的字体子集（data URI，含阿拉伯文）
+manifest.webmanifest    PWA 清单
+sw.js                   离线缓存 service worker
+icons/                  PWA 图标
+.github/workflows/      GitHub Pages 自动部署 + 离线版 Release
+mobile/                 Capacitor 原生壳（App Store / Google Play）
+js/i18n.js              8 种语言的全部文案
+docs/                   README 截图
+js/synth.js             音色合成、8-bit 模式、总线 + 位深/采样率压缩、录音器、ZIP 打包、离线渲染 / WAV 编码
+js/pixel.js             208×117 像素工厂场景（PixelMachine）
+js/app.js               UI、键盘、循环调度、音序器、录制、保存、多语言
+tools/subset-fonts.py   字体子集生成
+tools/build-artifact.py 单文件打包
+dist/                   打包输出
+```

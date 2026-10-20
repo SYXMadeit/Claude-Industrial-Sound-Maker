@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>工业声音生成器</title>
+  <meta name="description" content="用 Web Audio 合成的工业声音生成器：敲石头、敲管道、机器撞击、铃铛、镲、牛铃、铁砧、铁链、冲压机、油桶、铁皮板、汽笛、电焊、螺栓，附机器喷气像素动画。">
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#0f1115">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="工业声音">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/fonts.css">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">⚙</span>
+      <div>
+        <h1 data-i18n="title">工业声音生成器</h1>
+        <p class="sub" data-i18n="subtitle">全部声音由 WEB AUDIO 实时合成</p>
+      </div>
+    </div>
+    <div class="master">
+      <label class="lang-wrap"><span data-i18n="language">语言</span>
+        <select id="lang" class="px"></select>
+      </label>
+      <label><span data-i18n="masterVol">总音量</span> <input id="masterVol" type="range" min="0" max="1" step="0.01" value="0.8"></label>
+      <label><span data-i18n="reverb">车间混响</span> <input id="reverbWet" type="range" min="0" max="0.8" step="0.01" value="0.28"></label>
+      <button id="recBtn" class="btn px rec-btn" data-i18n="record">● 录制</button>
+      <button id="panic" class="btn px danger" data-i18n="stopAll">全部停止</button>
+      <button id="bugBtn" class="btn px" data-i18n="bug">报错</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel px machine-panel">
+      <div class="panel-head">
+        <h2 data-i18n="machine">机器</h2>
+        <span class="hint" data-i18n="hintCanvas">点击画面里的部件也能触发</span>
+      </div>
+      <div class="canvas-wrap px">
+        <canvas id="pixel" width="208" height="117"></canvas>
+        <div id="startOverlay" class="overlay">
+          <button id="startBtn" class="btn px big" data-i18n="start">▶ 启动机器</button>
+          <p data-i18n="startHint">浏览器需要一次点击才能开启音频</p>
+          <p class="hint silent-hint" data-i18n="silentHint">没有声音？先关闭手机的静音模式，再调大媒体音量。</p>
+        </div>
+      </div>
+      <div class="loops" id="loops"></div>
+      <div class="chip-panel px" id="chipPanel">
+        <div class="chip-head">
+          <button id="chipToggle" class="btn px chip-toggle"><span data-i18n="chip">8-BIT 模式</span><span class="keycap">P</span></button>
+          <span class="hint" data-i18n="chipHint">脉冲波 · LFSR 噪声 · 量化音高 · 阶梯包络，再在总线末端压位深与采样率</span>
+        </div>
+        <div class="chip-grid" id="chipGrid"></div>
+      </div>
+    </section>
+
+    <section class="panel px pads-panel">
+      <div class="panel-head">
+        <h2 data-i18n="hits">敲击</h2>
+        <span class="hint" data-i18n="hintKeys">键盘 1–7 Q–I 触发 · 8 9 0 切换机器 · 空格 播放/停止</span>
+      </div>
+      <div class="pads" id="pads"></div>
+    </section>
+
+    <section class="panel px seq-panel">
+      <div class="panel-head">
+        <h2 data-i18n="sequencer">音序器</h2>
+        <div class="seq-controls">
+          <button id="seqPlay" class="btn px accent" data-i18n="play">▶ 播放</button>
+          <label><span data-i18n="bpm">BPM</span> <input id="bpm" class="px" type="number" min="50" max="220" value="124"> <input id="bpmRange" type="range" min="50" max="220" value="124"></label>
+          <label><span data-i18n="swing">摇摆</span> <input id="swing" type="range" min="0" max="60" value="0"> <span id="swingVal" class="val">0%</span></label>
+          <button id="seqRandom" class="btn px" data-i18n="random">随机</button>
+          <button id="seqClear" class="btn px" data-i18n="clear">清空</button>
+        </div>
+      </div>
+      <div class="seq-grid" id="seqGrid"></div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p data-i18n="footer">无采样文件 · 所有音色均为参数化合成，每次敲击略有随机变化。「录制」会记录你演奏的一切，停止后即可下载。</p>
+  </footer>
+  <div id="toast" class="toast px" role="status" aria-live="polite"></div>
+
+  <div id="diag" class="diag hidden" role="dialog" aria-modal="true">
+    <div class="diag-box px">
+      <div class="panel-head">
+        <h2 data-i18n="diag">诊断</h2>
+        <button id="diagClose" class="btn px" data-i18n="close">关闭</button>
+      </div>
+      <div class="diag-row"><span data-i18n="outputLevel">输出电平</span><div class="meter px"><div id="meterBar" class="meter-bar"></div></div><span id="meterVal" class="val">-∞ dB</span></div>
+      <div class="diag-row"><span data-i18n="audioState">音频状态</span><span id="diagState" class="val">—</span></div>
+      <div class="diag-row"><span data-i18n="engine">压缩引擎</span><span id="diagEngine" class="val">—</span></div>
+      <div class="diag-actions">
+        <button id="testTone" class="btn px accent" data-i18n="testTone">测试音</button>
+        <button id="restartAudio" class="btn px" data-i18n="restartAudio">重启音频</button>
+        <button id="copyReport" class="btn px" data-i18n="copyReport">复制报告</button>
+      </div>
+      <p class="hint" data-i18n="muteHint">如果「测试音」也没声：检查静音键、媒体音量或蓝牙输出。</p>
+      <textarea id="diagLog" class="px" readonly rows="8" spellcheck="false"></textarea>
+    </div>
+  </div>
+
+  <script src="js/i18n.js"></script>
+  <script src="js/synth.js"></script>
+  <script src="js/pixel.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
